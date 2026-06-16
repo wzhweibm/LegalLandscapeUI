@@ -258,13 +258,16 @@ app.layout = dbc.Container(
             id="data-table",
             columnDefs=[],
             rowData=[],
-            rowSelection="multiple",
             dashGridOptions={
                 "pagination": True,
                 "paginationPageSize": 50,
                 "animateRows": True,
                 "tooltipShowDelay": 300,
-                "rowSelection": "multiple",
+                "rowSelection": {
+                    "mode": "multiRow",
+                    "checkboxes": True,
+                    "headerCheckbox": True,
+                },
             },
             defaultColDef={
                 "resizable": True,
