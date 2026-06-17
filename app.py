@@ -70,6 +70,7 @@ def build_column_defs(df: pd.DataFrame, original_cols: list) -> list:
                 "wrapText": False,
                 "autoHeight": False,
                 "minWidth": 100,
+                "tooltipField": col,
                 "headerClass": "original-col-header" if is_original else "generated-col-header",
                 "cellClass": "original-col-cell" if is_original else "generated-col-cell",
             }
@@ -270,6 +271,35 @@ app.layout = dbc.Container(
             className="mb-3 shadow-sm",
         ),
 
+        # ── Delete column ────────────────────────────────────────────────────
+        dbc.Row(
+            [
+                dbc.Col(
+                    dcc.Dropdown(
+                        id="dropdown-delete-col",
+                        options=[],
+                        placeholder="Select a column to delete…",
+                        clearable=True,
+                    ),
+                    width=6,
+                ),
+                dbc.Col(
+                    dbc.Button(
+                        "Delete Column",
+                        id="btn-delete-col",
+                        color="danger",
+                        outline=True,
+                    ),
+                    width="auto",
+                ),
+                dbc.Col(
+                    html.Div(id="delete-col-status", className="text-muted small align-self-center"),
+                    width=True,
+                ),
+            ],
+            className="align-items-center mb-3 g-2",
+        ),
+
         # ── Download button ──────────────────────────────────────────────────
         dbc.Button(
             "Download Excel",
@@ -321,6 +351,8 @@ app.layout = dbc.Container(
                 "ensureDomOrder": True,
                 "rowHeight": 36,
                 "headerHeight": 40,
+                "tooltipShowDelay": 300,
+                "tooltipHideDelay": 5000,
                 "rowSelection": {
                     "mode": "multiRow",
                     "checkboxes": True,
@@ -406,6 +438,7 @@ def show_api_warning(key_ok):
     Output("store-original-cols", "data"),
     Output("data-table", "columnDefs"),
     Output("data-table", "rowData"),
+    Output("dropdown-delete-col", "options"),
     Output("upload-status-alert", "children"),
     Output("upload-status-alert", "is_open"),
     Output("upload-status-alert", "color"),
@@ -415,7 +448,7 @@ def show_api_warning(key_ok):
 )
 def parse_upload(contents, filename):
     if contents is None:
-        return no_update, no_update, no_update, no_update, no_update, no_update, no_update
+        return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
     try:
         decoded = decode_upload(contents)
         df = pd.read_excel(io.BytesIO(decoded))
@@ -424,10 +457,11 @@ def parse_upload(contents, filename):
         store = df.to_json(orient="records")
         col_defs = build_column_defs(df, original_cols)
         row_data = df.to_dict("records")
+        col_options = [{"label": c, "value": c} for c in df.columns]
         msg = f"✓ Loaded '{filename}' — {len(df):,} rows × {len(df.columns)} columns."
-        return store, original_cols, col_defs, row_data, msg, True, "success"
+        return store, original_cols, col_defs, row_data, col_options, msg, True, "success"
     except Exception as e:
-        return no_update, no_update, no_update, no_update, f"Error reading file: {e}", True, "danger"
+        return no_update, no_update, no_update, no_update, no_update, f"Error reading file: {e}", True, "danger"
 
 
 # CB3 — Generate column
@@ -435,6 +469,7 @@ def parse_upload(contents, filename):
     Output("store-df", "data", allow_duplicate=True),
     Output("data-table", "columnDefs", allow_duplicate=True),
     Output("data-table", "rowData", allow_duplicate=True),
+    Output("dropdown-delete-col", "options", allow_duplicate=True),
     Output("generate-status", "children"),
     Input("btn-generate", "n_clicks"),
     State("generate-prompt", "value"),
@@ -444,9 +479,9 @@ def parse_upload(contents, filename):
 )
 def generate_column(n_clicks, prompt, store_data, original_cols):
     if store_data is None:
-        return no_update, no_update, no_update, "⚠ Please upload a file first."
+        return no_update, no_update, no_update, no_update, "⚠ Please upload a file first."
     if not prompt or not prompt.strip():
-        return no_update, no_update, no_update, "⚠ Please enter a prompt."
+        return no_update, no_update, no_update, no_update, "⚠ Please enter a prompt."
 
     df = pd.read_json(io.StringIO(store_data), orient="records", dtype=str).fillna("")
     records = df.to_dict("records")
@@ -471,8 +506,9 @@ def generate_column(n_clicks, prompt, store_data, original_cols):
     store = df.to_json(orient="records")
     col_defs = build_column_defs(df, original_cols or [])
     row_data = df.to_dict("records")
+    col_options = [{"label": c, "value": c} for c in df.columns]
     status = f"✓ Column '{col_name}' added ({n} rows processed)."
-    return store, col_defs, row_data, status
+    return store, col_defs, row_data, col_options, status
 
 
 # CB4 — Run consolidated analysis → store pending result → open modal
@@ -534,6 +570,7 @@ def run_consolidated(n_clicks, prompt, store_data, selected_rows):
     Output("store-df", "data", allow_duplicate=True),
     Output("data-table", "columnDefs", allow_duplicate=True),
     Output("data-table", "rowData", allow_duplicate=True),
+    Output("dropdown-delete-col", "options", allow_duplicate=True),
     Output("store-pending-consolidation", "data", allow_duplicate=True),
     Input("modal-accept", "n_clicks"),
     Input("modal-reject", "n_clicks"),
@@ -546,7 +583,7 @@ def handle_accept_reject(accept, reject, pending, store_data, original_cols):
     triggered = ctx.triggered_id
 
     if triggered == "modal-reject" or pending is None:
-        return False, no_update, no_update, no_update, None
+        return False, no_update, no_update, no_update, no_update, None
 
     # Accept: replace selected rows with consolidated row
     result_text = pending["result"]
@@ -554,20 +591,16 @@ def handle_accept_reject(accept, reject, pending, store_data, original_cols):
 
     df = pd.read_json(io.StringIO(store_data), orient="records", dtype=str).fillna("")
 
-    # Identify rows to remove by matching all column values against selected_rows
     selected_set = [json.dumps(row, sort_keys=True) for row in selected_rows]
 
     def row_is_selected(row_dict):
         return json.dumps(row_dict, sort_keys=True) in selected_set
 
     mask = df.apply(lambda r: row_is_selected(r.to_dict()), axis=1)
-    first_idx = mask.idxmax() if mask.any() else len(df)
 
-    # Build the consolidated row
     new_row = make_consolidated_row(df, selected_rows, result_text)
     new_row_df = pd.DataFrame([new_row])
 
-    # Remove selected rows and insert consolidated row at the position of the first removed row
     df_kept = df[~mask].reset_index(drop=True)
     insert_at = int(mask.values.argmax()) if mask.any() else len(df_kept)
     df_top = df_kept.iloc[:insert_at]
@@ -577,8 +610,41 @@ def handle_accept_reject(accept, reject, pending, store_data, original_cols):
     store = df_new.to_json(orient="records")
     col_defs = build_column_defs(df_new, original_cols or [])
     row_data = df_new.to_dict("records")
+    col_options = [{"label": c, "value": c} for c in df_new.columns]
 
-    return False, store, col_defs, row_data, None
+    return False, store, col_defs, row_data, col_options, None
+
+
+# CB_DEL — Delete column
+@app.callback(
+    Output("store-df", "data", allow_duplicate=True),
+    Output("data-table", "columnDefs", allow_duplicate=True),
+    Output("data-table", "rowData", allow_duplicate=True),
+    Output("dropdown-delete-col", "options", allow_duplicate=True),
+    Output("dropdown-delete-col", "value"),
+    Output("delete-col-status", "children"),
+    Input("btn-delete-col", "n_clicks"),
+    State("dropdown-delete-col", "value"),
+    State("store-df", "data"),
+    State("store-original-cols", "data"),
+    prevent_initial_call=True,
+)
+def delete_column(n_clicks, col_to_delete, store_data, original_cols):
+    if store_data is None:
+        return no_update, no_update, no_update, no_update, no_update, "⚠ Please upload a file first."
+    if not col_to_delete:
+        return no_update, no_update, no_update, no_update, no_update, "⚠ Please select a column."
+
+    df = pd.read_json(io.StringIO(store_data), orient="records", dtype=str).fillna("")
+    if col_to_delete not in df.columns:
+        return no_update, no_update, no_update, no_update, no_update, f"⚠ Column '{col_to_delete}' not found."
+
+    df = df.drop(columns=[col_to_delete])
+    store = df.to_json(orient="records")
+    col_defs = build_column_defs(df, original_cols or [])
+    row_data = df.to_dict("records")
+    col_options = [{"label": c, "value": c} for c in df.columns]
+    return store, col_defs, row_data, col_options, None, f"✓ Deleted column '{col_to_delete}'."
 
 
 # CB6 — Download Excel

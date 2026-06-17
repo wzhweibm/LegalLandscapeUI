@@ -1,22 +1,30 @@
+/* ── Column colour highlighting ─────────────────────────────────────────── */
+
 /* Original uploaded columns — light green */
-.original-col-header {
+.ag-header-cell.original-col-header {
     background-color: #c8e6c9 !important;
-    color: #1b5e20 !important;
 }
-.original-col-cell {
+.ag-header-cell.original-col-header .ag-header-cell-text {
+    color: #1b5e20 !important;
+    font-weight: 600;
+}
+.ag-cell.original-col-cell {
     background-color: #e8f5e9 !important;
 }
 
 /* GPT-generated columns — light orange */
-.generated-col-header {
+.ag-header-cell.generated-col-header {
     background-color: #ffe0b2 !important;
-    color: #bf360c !important;
 }
-.generated-col-cell {
+.ag-header-cell.generated-col-header .ag-header-cell-text {
+    color: #bf360c !important;
+    font-weight: 600;
+}
+.ag-cell.generated-col-cell {
     background-color: #fff3e0 !important;
 }
 
-/* Single-line rows: clip overflow, no wrapping */
+/* ── Single-line rows ────────────────────────────────────────────────────── */
 .ag-cell {
     white-space: nowrap !important;
     overflow: hidden !important;
@@ -24,7 +32,7 @@
     line-height: 1.4 !important;
 }
 
-/* Make cell text selectable for copying */
+/* ── Cell text selectable for copy ──────────────────────────────────────── */
 .ag-cell-value {
     user-select: text !important;
     -webkit-user-select: text !important;
