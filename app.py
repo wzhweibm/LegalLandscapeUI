@@ -57,9 +57,7 @@ def call_openai_row(row_dict: dict, prompt: str) -> str:
 def build_column_defs(df: pd.DataFrame, original_cols: list) -> list:
     """Build ag-grid column defs with colour-coded headers and cells."""
     defs = []
-    original_set = set(original_cols)
     for col in df.columns:
-        is_original = col in original_set
         defs.append(
             {
                 "field": col,
@@ -71,8 +69,6 @@ def build_column_defs(df: pd.DataFrame, original_cols: list) -> list:
                 "autoHeight": False,
                 "minWidth": 100,
                 "tooltipField": col,
-                "headerClass": "original-col-header" if is_original else "generated-col-header",
-                "cellClass": "original-col-cell" if is_original else "generated-col-cell",
             }
         )
     return defs
@@ -307,34 +303,6 @@ app.layout = dbc.Container(
             color="secondary",
             outline=True,
             className="mb-3",
-        ),
-
-        # ── Legend ───────────────────────────────────────────────────────────
-        html.Div(
-            [
-                html.Span(
-                    "  Original columns  ",
-                    style={
-                        "backgroundColor": "#e8f5e9",
-                        "border": "1px solid #c8e6c9",
-                        "borderRadius": "4px",
-                        "padding": "2px 8px",
-                        "marginRight": "12px",
-                        "fontSize": "0.8rem",
-                    },
-                ),
-                html.Span(
-                    "  GPT-generated columns  ",
-                    style={
-                        "backgroundColor": "#fff3e0",
-                        "border": "1px solid #ffe0b2",
-                        "borderRadius": "4px",
-                        "padding": "2px 8px",
-                        "fontSize": "0.8rem",
-                    },
-                ),
-            ],
-            className="mb-2",
         ),
 
         # ── Data table ───────────────────────────────────────────────────────
