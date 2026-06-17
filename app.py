@@ -46,7 +46,6 @@ def call_openai_row(row_dict: dict, prompt: str) -> str:
                     "content": f"{prompt}\n\nRow data:\n{row_text}",
                 },
             ],
-            max_tokens=500,
             temperature=0.2,
         )
         return resp.choices[0].message.content.strip()
@@ -460,7 +459,6 @@ def handle_consolidated(btn, close, prompt, store_data, selected_rows):
                     "content": f"{prompt}\n\nSelected rows:\n{context}",
                 },
             ],
-            max_tokens=1500,
             temperature=0.3,
         )
         result = resp.choices[0].message.content.strip()
