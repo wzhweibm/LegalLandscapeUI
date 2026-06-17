@@ -1,0 +1,31 @@
+/* Original uploaded columns — light green */
+.original-col-header {
+    background-color: #c8e6c9 !important;
+    color: #1b5e20 !important;
+}
+.original-col-cell {
+    background-color: #e8f5e9 !important;
+}
+
+/* GPT-generated columns — light orange */
+.generated-col-header {
+    background-color: #ffe0b2 !important;
+    color: #bf360c !important;
+}
+.generated-col-cell {
+    background-color: #fff3e0 !important;
+}
+
+/* Single-line rows: clip overflow, no wrapping */
+.ag-cell {
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    line-height: 1.4 !important;
+}
+
+/* Make cell text selectable for copying */
+.ag-cell-value {
+    user-select: text !important;
+    -webkit-user-select: text !important;
+}

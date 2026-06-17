@@ -1,6 +1,7 @@
 import os
 import io
 import base64
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
@@ -53,9 +54,12 @@ def call_openai_row(row_dict: dict, prompt: str) -> str:
         return f"[ERROR: {e}]"
 
 
-def build_column_defs(df: pd.DataFrame) -> list:
+def build_column_defs(df: pd.DataFrame, original_cols: list) -> list:
+    """Build ag-grid column defs with colour-coded headers and cells."""
     defs = []
+    original_set = set(original_cols)
     for col in df.columns:
+        is_original = col in original_set
         defs.append(
             {
                 "field": col,
@@ -63,10 +67,11 @@ def build_column_defs(df: pd.DataFrame) -> list:
                 "resizable": True,
                 "sortable": True,
                 "filter": True,
-                "wrapText": True,
-                "autoHeight": True,
-                "minWidth": 150,
-                "tooltipField": col,
+                "wrapText": False,
+                "autoHeight": False,
+                "minWidth": 100,
+                "headerClass": "original-col-header" if is_original else "generated-col-header",
+                "cellClass": "original-col-cell" if is_original else "generated-col-cell",
             }
         )
     return defs
@@ -86,10 +91,35 @@ def unique_col_name(df: pd.DataFrame, name: str) -> str:
     return f"{name}_{i}"
 
 
+def make_consolidated_row(df: pd.DataFrame, selected_rows: list, result_text: str) -> dict:
+    """Build a single consolidated row to replace the selected rows."""
+    n = len(selected_rows)
+    row = {col: "" for col in df.columns}
+    # Carry forward non-text identifier fields from the first selected row
+    first = selected_rows[0]
+    for col in ["Jurisdiction", "Practice Area"]:
+        if col in row and col in first:
+            row[col] = first[col]
+    # Mark the Row ID clearly
+    if "Row ID" in row:
+        ids = ", ".join(str(r.get("Row ID", "")) for r in selected_rows)
+        row["Row ID"] = f"CONSOLIDATED ({ids})"
+    # Put the GPT result into the main summary column
+    if "Update Summary" in row:
+        row["Update Summary"] = result_text
+    else:
+        # Fall back to the first column that isn't an ID-style field
+        for col in df.columns:
+            if col not in ("Row ID", "Source No.", "Dates", "URL"):
+                row[col] = result_text
+                break
+    return row
+
+
 # ── App initialisation ───────────────────────────────────────────────────────
 app = dash.Dash(
     __name__,
-    url_base_pathname = '/zw_test_1/',
+    url_base_pathname="/zw_test_1/",
     external_stylesheets=[dbc.themes.FLATLY],
     title="Legal AI Newsletter Analyzer",
     suppress_callback_exceptions=True,
@@ -100,12 +130,14 @@ server = app.server
 # ── Layout ───────────────────────────────────────────────────────────────────
 app.layout = dbc.Container(
     [
-        # Stores
+        # ── Stores ──────────────────────────────────────────────────────────
         dcc.Store(id="store-df", storage_type="memory"),
+        dcc.Store(id="store-original-cols", storage_type="memory"),   # list of original column names
         dcc.Store(id="store-api-key-ok", data=bool(_api_key)),
+        dcc.Store(id="store-pending-consolidation", storage_type="memory"),  # {result, selected_rows}
         dcc.Download(id="download-excel"),
 
-        # Navbar
+        # ── Navbar ───────────────────────────────────────────────────────────
         dbc.Navbar(
             dbc.Container(
                 [
@@ -131,7 +163,7 @@ app.layout = dbc.Container(
             className="mb-4 px-3",
         ),
 
-        # API key warning
+        # ── API key warning ──────────────────────────────────────────────────
         dbc.Alert(
             id="api-key-warning",
             color="danger",
@@ -140,18 +172,14 @@ app.layout = dbc.Container(
             className="mb-3",
         ),
 
-        # Upload area
+        # ── Upload area ──────────────────────────────────────────────────────
         dcc.Upload(
             id="upload-data",
             children=html.Div(
                 [
-                    html.I(className="me-2"),
                     "Drag & Drop or ",
                     html.A("Select an Excel File", className="fw-bold"),
-                    html.Div(
-                        "Accepts .xlsx / .xls",
-                        className="text-muted small mt-1",
-                    ),
+                    html.Div("Accepts .xlsx / .xls", className="text-muted small mt-1"),
                 ],
                 className="text-center py-2",
             ),
@@ -169,106 +197,130 @@ app.layout = dbc.Container(
         ),
         dbc.Alert(id="upload-status-alert", is_open=False, className="mb-3"),
 
-        # Controls card
+        # ── Controls card ────────────────────────────────────────────────────
         dbc.Card(
             dbc.CardBody(
-                [
-                    dbc.Tabs(
-                        [
-                            # ── Tab 1: Generate Column ───────────────────
-                            dbc.Tab(
-                                label="Generate Column",
-                                tab_id="tab-generate",
-                                children=[
-                                    html.P(
-                                        "Ask a question and GPT-5.4 will answer it for every row, "
-                                        "adding the results as a new column. You can run this "
-                                        "multiple times to add multiple columns.",
-                                        className="text-muted small mt-3",
+                dbc.Tabs(
+                    [
+                        # Tab 1 — Generate Column
+                        dbc.Tab(
+                            label="Generate Column",
+                            tab_id="tab-generate",
+                            children=[
+                                html.P(
+                                    "Ask a question and GPT-5.4 will answer it for every row, "
+                                    "adding the results as a new column (highlighted orange). "
+                                    "Run multiple times to add multiple columns.",
+                                    className="text-muted small mt-3",
+                                ),
+                                dbc.Textarea(
+                                    id="generate-prompt",
+                                    placeholder="e.g. What is the key legal risk in this update?",
+                                    rows=3,
+                                    className="mb-2",
+                                ),
+                                dcc.Loading(
+                                    id="loading-generate",
+                                    type="circle",
+                                    children=dbc.Button(
+                                        "Generate Column",
+                                        id="btn-generate",
+                                        color="primary",
+                                        className="me-2",
                                     ),
-                                    dbc.Textarea(
-                                        id="generate-prompt",
-                                        placeholder="e.g. What is the key legal risk in this update?",
-                                        rows=3,
-                                        className="mb-2",
-                                    ),
-                                    dcc.Loading(
-                                        id="loading-generate",
-                                        type="circle",
-                                        children=dbc.Button(
-                                            "Generate Column",
-                                            id="btn-generate",
-                                            color="primary",
-                                            className="me-2",
-                                        ),
-                                    ),
-                                    html.Div(
-                                        id="generate-status",
-                                        className="text-muted small mt-2",
-                                    ),
-                                ],
-                            ),
+                                ),
+                                html.Div(id="generate-status", className="text-muted small mt-2"),
+                            ],
+                        ),
 
-                            # ── Tab 2: Consolidated Output ────────────────
-                            dbc.Tab(
-                                label="Consolidated Output",
-                                tab_id="tab-consolidated",
-                                children=[
-                                    html.P(
-                                        "Select rows in the table below, then ask a question to "
-                                        "get a single consolidated GPT-5.4 analysis across all "
-                                        "selected rows.",
-                                        className="text-muted small mt-3",
+                        # Tab 2 — Consolidated Output
+                        dbc.Tab(
+                            label="Consolidated Output",
+                            tab_id="tab-consolidated",
+                            children=[
+                                html.P(
+                                    "Select rows in the table below, then ask a question. "
+                                    "GPT-5.4 will produce a consolidated analysis. "
+                                    "You can then accept (merges selected rows into one) or reject.",
+                                    className="text-muted small mt-3",
+                                ),
+                                dbc.Textarea(
+                                    id="consolidated-prompt",
+                                    placeholder="e.g. Summarise the common themes across these updates.",
+                                    rows=3,
+                                    className="mb-2",
+                                ),
+                                dcc.Loading(
+                                    id="loading-consolidated",
+                                    type="circle",
+                                    children=dbc.Button(
+                                        "Run Consolidated Analysis",
+                                        id="btn-consolidated",
+                                        color="success",
                                     ),
-                                    dbc.Textarea(
-                                        id="consolidated-prompt",
-                                        placeholder="e.g. Summarise the common themes across these updates.",
-                                        rows=3,
-                                        className="mb-2",
-                                    ),
-                                    dcc.Loading(
-                                        id="loading-consolidated",
-                                        type="circle",
-                                        children=dbc.Button(
-                                            "Run Consolidated Analysis",
-                                            id="btn-consolidated",
-                                            color="success",
-                                        ),
-                                    ),
-                                    html.Div(
-                                        id="consolidated-status",
-                                        className="text-muted small mt-2",
-                                    ),
-                                ],
-                            ),
-                        ],
-                        id="control-tabs",
-                        active_tab="tab-generate",
-                    ),
-                ]
+                                ),
+                                html.Div(id="consolidated-status", className="text-muted small mt-2"),
+                            ],
+                        ),
+                    ],
+                    id="control-tabs",
+                    active_tab="tab-generate",
+                )
             ),
             className="mb-3 shadow-sm",
         ),
 
-        # Download button
+        # ── Download button ──────────────────────────────────────────────────
         dbc.Button(
-            [html.I(className="me-1"), "Download Excel"],
+            "Download Excel",
             id="btn-download",
             color="secondary",
             outline=True,
             className="mb-3",
         ),
 
-        # Data table
+        # ── Legend ───────────────────────────────────────────────────────────
+        html.Div(
+            [
+                html.Span(
+                    "  Original columns  ",
+                    style={
+                        "backgroundColor": "#e8f5e9",
+                        "border": "1px solid #c8e6c9",
+                        "borderRadius": "4px",
+                        "padding": "2px 8px",
+                        "marginRight": "12px",
+                        "fontSize": "0.8rem",
+                    },
+                ),
+                html.Span(
+                    "  GPT-generated columns  ",
+                    style={
+                        "backgroundColor": "#fff3e0",
+                        "border": "1px solid #ffe0b2",
+                        "borderRadius": "4px",
+                        "padding": "2px 8px",
+                        "fontSize": "0.8rem",
+                    },
+                ),
+            ],
+            className="mb-2",
+        ),
+
+        # ── Data table ───────────────────────────────────────────────────────
         dag.AgGrid(
             id="data-table",
             columnDefs=[],
             rowData=[],
+            columnSize="autoSize",
             dashGridOptions={
                 "pagination": True,
                 "paginationPageSize": 50,
                 "animateRows": True,
-                "tooltipShowDelay": 300,
+                "enableCellTextSelection": True,
+                "ensureDomOrder": True,
+                "rowHeight": 36,
+                "headerHeight": 40,
                 "rowSelection": {
                     "mode": "multiRow",
                     "checkboxes": True,
@@ -279,30 +331,47 @@ app.layout = dbc.Container(
                 "resizable": True,
                 "sortable": True,
                 "filter": True,
-                "wrapText": True,
-                "autoHeight": True,
+                "wrapText": False,
+                "autoHeight": False,
             },
             style={"height": "550px", "width": "100%"},
             className="ag-theme-alpine mb-4",
         ),
 
-        # Consolidated result modal
+        # ── Consolidated result modal (with Accept / Reject) ─────────────────
         dbc.Modal(
             [
-                dbc.ModalHeader(dbc.ModalTitle("Consolidated Analysis Result")),
+                dbc.ModalHeader(dbc.ModalTitle("Consolidated Analysis — Review Proposed Result")),
                 dbc.ModalBody(
-                    dcc.Markdown(
-                        id="consolidated-result-text",
-                        style={"whiteSpace": "pre-wrap"},
-                    )
+                    [
+                        dbc.Alert(
+                            "Review the GPT-5.4 consolidated output below. "
+                            "Accept to replace the selected rows with this single consolidated row, "
+                            "or Reject to leave the table unchanged.",
+                            color="info",
+                            className="mb-3",
+                        ),
+                        dcc.Markdown(
+                            id="consolidated-result-text",
+                            style={"whiteSpace": "pre-wrap"},
+                        ),
+                    ]
                 ),
                 dbc.ModalFooter(
-                    dbc.Button(
-                        "Close",
-                        id="modal-close",
-                        color="secondary",
-                        className="ms-auto",
-                    )
+                    [
+                        dbc.Button(
+                            "✓ Accept — Replace Selected Rows",
+                            id="modal-accept",
+                            color="success",
+                            className="me-2",
+                        ),
+                        dbc.Button(
+                            "✗ Reject",
+                            id="modal-reject",
+                            color="danger",
+                            outline=True,
+                        ),
+                    ]
                 ),
             ],
             id="consolidated-modal",
@@ -317,7 +386,6 @@ app.layout = dbc.Container(
 
 # ── Callbacks ────────────────────────────────────────────────────────────────
 
-# CB2 — API key warning (runs on load)
 @app.callback(
     Output("api-key-warning", "is_open"),
     Output("api-key-warning", "children"),
@@ -335,6 +403,7 @@ def show_api_warning(key_ok):
 # CB1 — Upload & parse
 @app.callback(
     Output("store-df", "data"),
+    Output("store-original-cols", "data"),
     Output("data-table", "columnDefs"),
     Output("data-table", "rowData"),
     Output("upload-status-alert", "children"),
@@ -346,29 +415,22 @@ def show_api_warning(key_ok):
 )
 def parse_upload(contents, filename):
     if contents is None:
-        return no_update, no_update, no_update, no_update, no_update, no_update
+        return no_update, no_update, no_update, no_update, no_update, no_update, no_update
     try:
         decoded = decode_upload(contents)
         df = pd.read_excel(io.BytesIO(decoded))
-        # Convert all columns to string for safe JSON serialisation
         df = df.astype(str).replace("nan", "")
+        original_cols = list(df.columns)
         store = df.to_json(orient="records")
-        col_defs = build_column_defs(df)
+        col_defs = build_column_defs(df, original_cols)
         row_data = df.to_dict("records")
         msg = f"✓ Loaded '{filename}' — {len(df):,} rows × {len(df.columns)} columns."
-        return store, col_defs, row_data, msg, True, "success"
+        return store, original_cols, col_defs, row_data, msg, True, "success"
     except Exception as e:
-        return (
-            no_update,
-            no_update,
-            no_update,
-            f"Error reading file: {e}",
-            True,
-            "danger",
-        )
+        return no_update, no_update, no_update, no_update, f"Error reading file: {e}", True, "danger"
 
 
-# CB3 — Generate column (concurrent API calls)
+# CB3 — Generate column
 @app.callback(
     Output("store-df", "data", allow_duplicate=True),
     Output("data-table", "columnDefs", allow_duplicate=True),
@@ -377,9 +439,10 @@ def parse_upload(contents, filename):
     Input("btn-generate", "n_clicks"),
     State("generate-prompt", "value"),
     State("store-df", "data"),
+    State("store-original-cols", "data"),
     prevent_initial_call=True,
 )
-def generate_column(n_clicks, prompt, store_data):
+def generate_column(n_clicks, prompt, store_data, original_cols):
     if store_data is None:
         return no_update, no_update, no_update, "⚠ Please upload a file first."
     if not prompt or not prompt.strip():
@@ -406,37 +469,33 @@ def generate_column(n_clicks, prompt, store_data):
     df[col_name] = results
 
     store = df.to_json(orient="records")
-    col_defs = build_column_defs(df)
+    col_defs = build_column_defs(df, original_cols or [])
     row_data = df.to_dict("records")
     status = f"✓ Column '{col_name}' added ({n} rows processed)."
     return store, col_defs, row_data, status
 
 
-# CB4 — Consolidated analysis + modal close
+# CB4 — Run consolidated analysis → store pending result → open modal
 @app.callback(
     Output("consolidated-modal", "is_open"),
     Output("consolidated-result-text", "children"),
     Output("consolidated-status", "children"),
+    Output("store-pending-consolidation", "data"),
     Input("btn-consolidated", "n_clicks"),
-    Input("modal-close", "n_clicks"),
     State("consolidated-prompt", "value"),
     State("store-df", "data"),
     State("data-table", "selectedRows"),
     prevent_initial_call=True,
 )
-def handle_consolidated(btn, close, prompt, store_data, selected_rows):
-    triggered = ctx.triggered_id
-    if triggered == "modal-close":
-        return False, no_update, no_update
-
+def run_consolidated(n_clicks, prompt, store_data, selected_rows):
     if store_data is None:
-        return False, no_update, "⚠ Please upload a file first."
+        return False, no_update, "⚠ Please upload a file first.", no_update
     if not selected_rows:
-        return False, no_update, "⚠ Please select at least one row in the table."
+        return False, no_update, "⚠ Please select at least one row in the table.", no_update
     if not prompt or not prompt.strip():
-        return False, no_update, "⚠ Please enter a prompt."
+        return False, no_update, "⚠ Please enter a prompt.", no_update
     if client is None:
-        return False, no_update, "⚠ OPENAI_API_KEY is not set."
+        return False, no_update, "⚠ OPENAI_API_KEY is not set.", no_update
 
     context = "\n\n---\n\n".join(
         f"Row {i + 1}:\n" + "\n".join(f"{k}: {v}" for k, v in row.items())
@@ -462,12 +521,67 @@ def handle_consolidated(btn, close, prompt, store_data, selected_rows):
             temperature=0.3,
         )
         result = resp.choices[0].message.content.strip()
-        return True, result, f"✓ Analysis completed across {len(selected_rows)} row(s)."
+        pending = {"result": result, "selected_rows": selected_rows}
+        status = f"✓ Analysis completed across {len(selected_rows)} row(s). Review in the pop-up."
+        return True, result, status, pending
     except Exception as e:
-        return False, no_update, f"[ERROR: {e}]"
+        return False, no_update, f"[ERROR: {e}]", no_update
 
 
-# CB5 — Download Excel
+# CB5 — Accept or Reject consolidated result
+@app.callback(
+    Output("consolidated-modal", "is_open", allow_duplicate=True),
+    Output("store-df", "data", allow_duplicate=True),
+    Output("data-table", "columnDefs", allow_duplicate=True),
+    Output("data-table", "rowData", allow_duplicate=True),
+    Output("store-pending-consolidation", "data", allow_duplicate=True),
+    Input("modal-accept", "n_clicks"),
+    Input("modal-reject", "n_clicks"),
+    State("store-pending-consolidation", "data"),
+    State("store-df", "data"),
+    State("store-original-cols", "data"),
+    prevent_initial_call=True,
+)
+def handle_accept_reject(accept, reject, pending, store_data, original_cols):
+    triggered = ctx.triggered_id
+
+    if triggered == "modal-reject" or pending is None:
+        return False, no_update, no_update, no_update, None
+
+    # Accept: replace selected rows with consolidated row
+    result_text = pending["result"]
+    selected_rows = pending["selected_rows"]
+
+    df = pd.read_json(io.StringIO(store_data), orient="records", dtype=str).fillna("")
+
+    # Identify rows to remove by matching all column values against selected_rows
+    selected_set = [json.dumps(row, sort_keys=True) for row in selected_rows]
+
+    def row_is_selected(row_dict):
+        return json.dumps(row_dict, sort_keys=True) in selected_set
+
+    mask = df.apply(lambda r: row_is_selected(r.to_dict()), axis=1)
+    first_idx = mask.idxmax() if mask.any() else len(df)
+
+    # Build the consolidated row
+    new_row = make_consolidated_row(df, selected_rows, result_text)
+    new_row_df = pd.DataFrame([new_row])
+
+    # Remove selected rows and insert consolidated row at the position of the first removed row
+    df_kept = df[~mask].reset_index(drop=True)
+    insert_at = int(mask.values.argmax()) if mask.any() else len(df_kept)
+    df_top = df_kept.iloc[:insert_at]
+    df_bottom = df_kept.iloc[insert_at:]
+    df_new = pd.concat([df_top, new_row_df, df_bottom], ignore_index=True)
+
+    store = df_new.to_json(orient="records")
+    col_defs = build_column_defs(df_new, original_cols or [])
+    row_data = df_new.to_dict("records")
+
+    return False, store, col_defs, row_data, None
+
+
+# CB6 — Download Excel
 @app.callback(
     Output("download-excel", "data"),
     Input("btn-download", "n_clicks"),
@@ -484,13 +598,5 @@ def download_excel(n_clicks, store_data):
     return dcc.send_bytes(buffer.read(), "newsletter_analyzed.xlsx")
 
 
-
-@app.callback(
-    Output("output", "children"),
-    Input("text-input", "value"),
-)
-def update_output(value):
-    return f"You typed: {value}"
-
-if __name__ == '__main__':
-    app.run(host="127.0.0.1", port=50001, debug=False, ssl_context=(ssl_cert, ssl_key)) 
+if __name__ == "__main__":
+    app.run(host="127.0.0.1", port=50001, debug=False, ssl_context=(ssl_cert, ssl_key))
