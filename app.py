@@ -10,11 +10,17 @@ import dash_bootstrap_components as dbc
 import dash_ag_grid as dag
 from openai import OpenAI
 
+from dotenv import load_dotenv
+load_dotenv("/opt/private/env.txt")
+
+ssl_cert = os.environ.get("BM_SSL_CERT_FILE")
+ssl_key = os.environ.get("BM_SSL_KEY_FILE")
+
 # ── Constants & OpenAI client ────────────────────────────────────────────────
 MODEL = "gpt-5.4"
 MAX_WORKERS = 10
 
-_api_key = os.environ.get("OPENAI_API_KEY")
+_api_key = os.environ.get("OPENAI_TEAM_API_KEY")
 client = OpenAI(api_key=_api_key) if _api_key else None
 
 
@@ -84,6 +90,7 @@ def unique_col_name(df: pd.DataFrame, name: str) -> str:
 # ── App initialisation ───────────────────────────────────────────────────────
 app = dash.Dash(
     __name__,
+    url_base_pathname = '/zw_test_1/',
     external_stylesheets=[dbc.themes.FLATLY],
     title="Legal AI Newsletter Analyzer",
     suppress_callback_exceptions=True,
@@ -479,5 +486,13 @@ def download_excel(n_clicks, store_data):
     return dcc.send_bytes(buffer.read(), "newsletter_analyzed.xlsx")
 
 
-if __name__ == "__main__":
-    app.run(debug=False, host="0.0.0.0", port=8050)
+
+@app.callback(
+    Output("output", "children"),
+    Input("text-input", "value"),
+)
+def update_output(value):
+    return f"You typed: {value}"
+
+if __name__ == '__main__':
+    app.run(host="127.0.0.1", port=50001, debug=False, ssl_context=(ssl_cert, ssl_key)) 
