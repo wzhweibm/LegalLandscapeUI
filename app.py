@@ -212,7 +212,7 @@ app.layout = dbc.Container(
                                 ),
                                 dbc.Textarea(
                                     id="generate-prompt",
-                                    placeholder="e.g. What is the key legal risk in this update?",
+                                    value="what is the key authority issued the legal update? only output the authority.",
                                     rows=3,
                                     className="mb-2",
                                 ),
